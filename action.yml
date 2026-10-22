@@ -1,0 +1,26 @@
+name: Actions Lockfile Verify
+description: >-
+  Installs the pinned github/gh-actions-lock extension and verifies that the
+  given onboarded workflow paths are locked and current. A lockfile change
+  decides which commit executes, so keep this gate required on pull requests
+  that touch .github/workflows/**.
+author: southernlights.tech
+
+inputs:
+  workflows:
+    description: "Space-separated list of workflow paths to verify, e.g. '.github/workflows/deploy-prod.yml .github/workflows/deploy-prod.reusable.yaml'."
+    required: true
+  extension-pin:
+    description: "Pinned version of github/gh-actions-lock."
+    required: false
+    default: "v0.2.0"
+
+runs:
+  using: composite
+  steps:
+    - name: Verify actions lockfile
+      shell: bash
+      env:
+        WORKFLOWS: ${{ inputs.workflows }}
+        EXTENSION_PIN: ${{ inputs.extension-pin }}
+      run: bash "${{ github.action_path }}/scripts/verify-actions-lock.sh"
