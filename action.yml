@@ -8,12 +8,16 @@ author: southernlights.tech
 
 inputs:
   workflows:
-    description: "Space-separated list of workflow paths to verify, e.g. '.github/workflows/deploy-prod.yml .github/workflows/deploy-prod.reusable.yaml'."
+    description: "Space-separated list of workflow paths to verify, e.g. '.github/workflows/release.yml .github/workflows/build.yml'."
     required: true
   extension-pin:
     description: "Pinned version of github/gh-actions-lock."
     required: false
     default: "v0.2.0"
+  token:
+    description: "Token used by the gh CLI. Defaults to the workflow's GITHUB_TOKEN."
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -23,4 +27,5 @@ runs:
       env:
         WORKFLOWS: ${{ inputs.workflows }}
         EXTENSION_PIN: ${{ inputs.extension-pin }}
+        GH_TOKEN: ${{ inputs.token || github.token }}
       run: bash "${{ github.action_path }}/scripts/verify-actions-lock.sh"

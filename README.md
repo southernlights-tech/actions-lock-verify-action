@@ -23,21 +23,34 @@ jobs:
       - uses: actions/checkout@v7
       - uses: southernlights-tech/actions-lock-verify-action@v1
         with:
-          workflows: .github/workflows/deploy-prod.yml .github/workflows/deploy-prod.reusable.yaml
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          workflows: .github/workflows/release.yml .github/workflows/build.yml
 ```
 
-The caller owns the `pull_request` trigger and the explicit onboarded-path list,
-and `GH_TOKEN` must be supplied by the caller (e.g. job-level
-`GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}`).
+The caller owns the `pull_request` trigger and the explicit onboarded-path list.
+The token defaults to the workflow's `GITHUB_TOKEN`; pass `token:` only to use a
+different credential.
 
 ## Inputs
 
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
-| `workflows` | yes | — | Space-separated list of workflow paths to verify. |
+| `workflows` | yes | - | Space-separated list of workflow paths to verify. |
 | `extension-pin` | no | `v0.2.0` | Pinned version of `github/gh-actions-lock`. |
+| `token` | no | `github.token` | Token used by the `gh` CLI. |
+
+## Onboarding and governance
+
+- **Onboard one workflow at a time, by explicit path.** Never run the extension
+  bare (`gh actions-lock` with no path): that onboards every workflow at once.
+- **Add the newly onboarded path to the caller's `workflows` list in the same
+  pull request**, so the gate covers it from the moment it is onboarded.
+- **Never hand-edit the lockfile.** It is machine-generated; fix the workflow
+  files and regenerate.
+- **A lockfile change decides which commit executes**, so it is a
+  code-execution change and must be reviewed by a human.
+- **Do not name a lockfile-change branch `dependabot/*`** -- a Dependabot merge
+  train will auto-approve and auto-merge those.
+- Reference: <https://gh.io/actions-lockfile>
 
 ## Why the explicit path list
 
@@ -51,6 +64,15 @@ a repo has actually onboarded.
 The action runs inside the caller's job, so `runs-on`, `permissions`, and the
 self-hosted runner stay in the consuming repo. The reusable gate ships only the
 verification logic, not the runner or permission model.
+
+## Runner assumptions
+
+`gh extension install` is not idempotent: it errors when the extension is
+already present. This action therefore assumes an **ephemeral** runner, where
+every job starts clean (GitHub-hosted runners, or autoscaled pods such as an ARC
+`self-hosted` pool). On a long-lived self-hosted runner, clear the extension
+between runs (`gh extension remove gh-actions-lock`) or run the job in a
+container.
 
 ## Development
 

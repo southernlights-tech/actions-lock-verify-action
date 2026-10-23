@@ -9,7 +9,8 @@
 #   WORKFLOWS      space-separated list of workflow paths to verify (>= 1)
 # Optional env:
 #   EXTENSION_PIN  github/gh-actions-lock version (default v0.2.0)
-#   GH_TOKEN       authenticated gh CLI token (provided by the caller)
+#   GH_TOKEN       authenticated gh CLI token (the action passes the workflow
+#                  token by default; see action.yml)
 set -euo pipefail
 
 EXTENSION_PIN="${EXTENSION_PIN:-v0.2.0}"
