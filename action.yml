@@ -11,9 +11,17 @@ inputs:
     description: "Space-separated list of workflow paths to verify, e.g. '.github/workflows/release.yml .github/workflows/build.yml'."
     required: true
   extension-pin:
-    description: "Pinned version of github/gh-actions-lock."
+    description: "Pinned version of github/gh-actions-lock. Requires v0.3.0 or newer for the ignore-local-actions input."
     required: false
-    default: "v0.2.0"
+    default: "v0.4.0"
+  ignore-local-actions:
+    description: >-
+      Pass --ignore-local-actions to the verifier so workflows that call
+      same-repo composite actions (uses: ./…) are kept as warnings instead of
+      blocking the verify. Enable this only for repositories that rely on local
+      composite actions.
+    required: false
+    default: "false"
   token:
     description: "Token used by the gh CLI. Defaults to the workflow's GITHUB_TOKEN."
     required: false
@@ -27,5 +35,6 @@ runs:
       env:
         WORKFLOWS: ${{ inputs.workflows }}
         EXTENSION_PIN: ${{ inputs.extension-pin }}
+        IGNORE_LOCAL_ACTIONS: ${{ inputs.ignore-local-actions }}
         GH_TOKEN: ${{ inputs.token || github.token }}
       run: bash "${{ github.action_path }}/scripts/verify-actions-lock.sh"
