@@ -30,7 +30,7 @@ teardown() {
     export WORKFLOWS=".github/workflows/a.yml .github/workflows/b.yml"
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
-    run grep -F "extension install github/gh-actions-lock --pin v0.2.0" "$ARGS_FILE"
+    run grep -F "extension install github/gh-actions-lock --pin v0.4.0" "$ARGS_FILE"
     [ "$status" -eq 0 ]
     run grep -F "actions-lock --verify .github/workflows/a.yml .github/workflows/b.yml" "$ARGS_FILE"
     [ "$status" -eq 0 ]
@@ -55,4 +55,21 @@ teardown() {
     export STUB_EXTENSION_FAIL="1"
     run bash "$SCRIPT"
     [ "$status" -ne 0 ]
+}
+
+@test "does not pass --ignore-local-actions by default" {
+    export WORKFLOWS=".github/workflows/a.yml"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -F -- "--ignore-local-actions" "$ARGS_FILE"
+    [ "$status" -ne 0 ]
+}
+
+@test "passes --ignore-local-actions when IGNORE_LOCAL_ACTIONS=true" {
+    export WORKFLOWS=".github/workflows/a.yml"
+    export IGNORE_LOCAL_ACTIONS="true"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -F -- "actions-lock --verify --ignore-local-actions .github/workflows/a.yml" "$ARGS_FILE"
+    [ "$status" -eq 0 ]
 }

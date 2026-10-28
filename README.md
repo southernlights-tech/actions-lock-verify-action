@@ -35,7 +35,8 @@ different credential.
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
 | `workflows` | yes | - | Space-separated list of workflow paths to verify. |
-| `extension-pin` | no | `v0.2.0` | Pinned version of `github/gh-actions-lock`. |
+| `extension-pin` | no | `v0.4.0` | Pinned version of `github/gh-actions-lock`. |
+| `ignore-local-actions` | no | `false` | Pass `--ignore-local-actions` so workflows that call same-repo composite actions (`uses: ./…`) are kept as warnings instead of blocking the verify. |
 | `token` | no | `github.token` | Token used by the `gh` CLI. |
 
 ## Onboarding and governance
@@ -58,6 +59,19 @@ A repo-wide `gh actions-lock --verify` exits non-zero until every workflow is
 onboarded, which would leave a permanently red gate. The list is therefore
 explicit and per-onboarded-workflow, so the gate is green only for the workflows
 a repo has actually onboarded.
+
+## Local composite actions
+
+`gh-actions-lock` cannot follow or lock a same-repo composite action
+(`uses: ./.github/actions/...`): the action runs whatever is in the workspace.
+From `v0.3.0` such a reference blocks `--verify` by default. Pass
+`ignore-local-actions: true` to keep it as a non-failing warning, so a workflow
+that calls a local composite can still be onboarded.
+
+The extension's default is to block, because a local action is outside the
+lockfile's guarantee. Enable the input only where the workflow genuinely needs
+the local composite; prefer moving shared logic into a published action when
+the supply-chain guarantee matters.
 
 ## Why a composite action
 
