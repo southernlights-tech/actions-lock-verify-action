@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   must be in the gate's `pull_request.paths` when the repository has composites;
   and the gate may never silence the verifier (CLI flag or YAML input, comments
   excepted). New inputs: `gate-workflow`, `excluded-workflows`, `check-gate-coverage`.
+- The coverage check accepts the `workflows:` input quoted or unquoted, and
+  rejects an ordered negation that cancels `.github/actions/**` in the gate's
+  `pull_request.paths`.
 - `tests/gate-coverage.bats` covering each assertion and its failure mode.
 
 ### Deprecated

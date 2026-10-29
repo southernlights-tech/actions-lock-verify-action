@@ -224,3 +224,42 @@ LOCK
     [ "$status" -eq 0 ]
     [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
 }
+
+@test "passes when the gate declares an unquoted workflows scalar" {
+    sed -i 's|^\([[:space:]]*workflows: \)"\(.*\)"$|\1\2|' "${GATE}"
+    # Sanity: the input really is unquoted.
+    grep -q '^[[:space:]]*workflows: \.github/workflows/a\.yml \.github/workflows/b\.yml$' "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
+}
+
+@test "REGRESSION: rejects a negation that cancels the composite path" {
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!.github/actions/**'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"negat"* && "$output" == *"cancel"* ]]
+}
+
+@test "passes when paths items sit at the same indentation as the key" {
+    sed -i "/^      - '\.github\//s/^  //" "${GATE}"
+    # Sanity: the sequence items now align with `paths:`.
+    grep -q "^    - '\.github/actions/\*\*'" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
+}
+
+@test "passes when the gate explicitly sets ignore-local-actions: false" {
+    sed -i 's|^\([[:space:]]*workflows: "\)|          ignore-local-actions: false\n\1|' "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
+}
+
+@test "REGRESSION: fails when the gate sets ignore-local-actions: 'true' quoted" {
+    sed -i "s|^\([[:space:]]*workflows: \"\)|          ignore-local-actions: 'true'\n\1|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ignore-local-actions"* ]]
+}

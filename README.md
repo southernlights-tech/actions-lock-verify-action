@@ -72,16 +72,24 @@ declared:
 - The caller's gate workflow `workflows:` input, the `workflows:` input passed to
   this action, and the `workflows:` keys in `actions.lock` must agree **as sets
   in both directions**. A path in one list but not another fails, and the error
-  names the path and the list it is missing from.
+  names the path and the list it is missing from. The `workflows:` input may be
+  written as a quoted or an unquoted single-line scalar
+  (`workflows: "a.yml b.yml"` or `workflows: a.yml b.yml`); a YAML block or flow
+  indicator (`|`, `>`, `[`, `{`) is rejected.
 - Every listed path must exist in the workspace.
 - No `excluded-workflows` entry may appear in any of the three lists.
 - `.github/actions/**` must be in the gate's `pull_request.paths` **when the
   repository has composites**. A repo with a `.github/actions` directory must
   re-run the gate when a composite changes; a repo without one is not forced to
-  carry a dead path filter.
+  carry a dead path filter. Because `paths` is ordered, a later negation that
+  cancels `.github/actions/**` (for example `- '!.github/actions/**'`) is
+  rejected even when the positive entry is present — it would leave composite
+  edits not running the gate.
 - The gate may never silence the verifier — neither the `--ignore-local-actions`
-  CLI flag nor the `ignore-local-actions: true` YAML input. Comments that merely
-  mention the flag are ignored.
+  CLI flag nor a truthy `ignore-local-actions` YAML input (`true`/`yes`/`on`/`1`,
+  quoted or unquoted). An explicit `ignore-local-actions: false` keeps
+  verification on and is accepted. Comments that merely mention the flag are
+  ignored.
 
 The check reads only `sed`/`grep`/`awk`/coreutils, so it needs no extra tooling.
 Set `check-gate-coverage: false` to skip it for a non-standard gate; the verifier
