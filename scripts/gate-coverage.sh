@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # scripts/gate-coverage.sh
 #
-# Pre-check that runs BEFORE any network call. It asserts that three lists
-# agree: the workflow paths handed to the composite action (WORKFLOWS), the
-# gate workflow that invokes the action (GATE_WORKFLOW), and the lockfile the
-# verifier reads (LOCKFILE). A disagreement means the gate is green for a set
-# of workflows nobody declared, which is worse than a red gate.
+# Pre-check that runs BEFORE any network call. It asserts that two lists
+# agree: the workflow paths handed to the composite action (WORKFLOWS) and the
+# lockfile the verifier reads (LOCKFILE). A disagreement means the gate is
+# green for a set of workflows nobody declared, which is worse than a red gate.
+# It also asserts that the caller's gate cannot silence the verifier and, when
+# the repository has composites, that its `pull_request.paths` still triggers
+# on them.
 #
 # Required env:
 #   WORKFLOWS            space-separated list passed to the action (>= 1 path)
@@ -16,15 +18,19 @@
 #                        (default empty)
 #   LOCKFILE             default .github/workflows/actions.lock
 #   GITHUB_WORKSPACE     root the paths above resolve against (default .)
+#   IGNORE_LOCAL_ACTIONS resolved `ignore-local-actions` input, as the runner
+#                        evaluated it (default false)
 #
 # Parsing contract (sed/grep/awk + coreutils only; no yq, jq or python):
 #
-#   * The gate's action input must appear exactly once, as a single-line YAML
-#     scalar, quoted or unquoted:
-#         workflows: "<space-separated list>"
-#         workflows: <space-separated list>
-#     Any leading indentation is allowed. A block or flow indicator in place of
-#     a scalar ('|', '>', '[', '{', '|-', '>-') is rejected.
+#   * The workflow list is taken verbatim from the action input (the WORKFLOWS
+#     env var), which is the resolved value the caller's step hands to the
+#     composite action. It is NOT parsed out of the gate YAML: re-reading the
+#     caller's file for a value the action already receives is redundant and
+#     fragile, and a second `workflows:` key in that file (for example a
+#     `workflow_run: workflows: [Build]` trigger) is not an input at all.
+#     Only the gate's `pull_request.paths` list is read from the gate file, to
+#     assert the composite trigger.
 #   * The lockfile's workflow keys live in the top-level `workflows:` map and
 #     end at the top-level `dependencies:` map. A workflow with no remote
 #     actions is written as `    'path': []`, so the key pattern accepts an
@@ -34,19 +40,27 @@
 #     per line and `sort -u`d before `comm` runs in both directions.
 #   * The `ignore[-_]local[-_]actions` assertion strips comments first
 #     (`sed 's/#.*//'`), so a comment that merely mentions the flag does not
-#     trip the guard. Outside a comment the CLI flag
-#     (`--ignore-local-actions`) fails, and so does the YAML input key when its
-#     value is truthy (`ignore-local-actions: true|yes|on|1`, quoted or not);
-#     an explicit `ignore-local-actions: false|no|off|0` passes because it
-#     leaves verification on.
+#     trip the guard. It fails three ways: the RESOLVED input (env
+#     IGNORE_LOCAL_ACTIONS) being truthy, the CLI flag
+#     (`--ignore-local-actions`) appearing outside a comment, and the YAML
+#     input key being set to a truthy literal
+#     (`ignore-local-actions: true|yes|on|1`, quoted or not). The resolved
+#     value is checked first because that is the only way to catch an
+#     expression: `ignore-local-actions: ${{ true }}` or a variable evaluates
+#     to a truthy input the literal pattern cannot see. An explicit
+#     `ignore-local-actions: false|no|off|0` passes because it leaves
+#     verification on.
 #   * The `.github/actions/**` path-filter assertion is conditional: it only
 #     applies when the workspace has a `.github/actions` directory. A repo
 #     with no composites cannot change a pin by editing one, so it is not
 #     forced to carry a dead path filter; a repo with composites must trigger
-#     on them. An ordered negation mentioning `.github/actions` (e.g.
-#     `- '!.github/actions/**'`) fails even when the inclusion is present,
-#     because it cancels that trigger. When the assertion does not apply it
-#     emits nothing.
+#     on them. Because `paths` is ordered, a negation that could cancel that
+#     trigger fails even when the positive entry is present. Overlap is
+#     decided conservatively by path prefix: an ancestor glob such as
+#     `!.github/**`, a bare `!*`/`!**`, and a brace set (whose expansion cannot
+#     be ruled out) all fail, while unrelated negations such as `!docs/**` or
+#     `!.github/workflows/**` pass. When the assertion does not apply it emits
+#     nothing.
 set -euo pipefail
 
 WORKFLOWS="${WORKFLOWS:-}"
@@ -54,6 +68,7 @@ GATE_WORKFLOW="${GATE_WORKFLOW:-.github/workflows/actions-lock-verify.yaml}"
 EXCLUDED_WORKFLOWS="${EXCLUDED_WORKFLOWS:-}"
 LOCKFILE="${LOCKFILE:-.github/workflows/actions.lock}"
 GITHUB_WORKSPACE="${GITHUB_WORKSPACE:-.}"
+IGNORE_LOCAL_ACTIONS="${IGNORE_LOCAL_ACTIONS:-false}"
 
 fail() {
     echo "::error::gate-coverage: $*" >&2
@@ -77,7 +92,6 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
 action_list="${tmp_dir}/action.txt"
-gate_list="${tmp_dir}/gate.txt"
 lock_list="${tmp_dir}/lock.txt"
 
 printf '%s\n' "${WORKFLOWS}" | split_list > "${action_list}"
@@ -101,45 +115,6 @@ fi
 # Comments are stripped for every structural assertion below.
 gate_stripped="${tmp_dir}/gate.no-comments"
 sed 's/#.*//' "${gate_path}" > "${gate_stripped}"
-
-# 3. The gate must declare exactly one workflow list, as a single-line scalar.
-#    Both documented forms are accepted:
-#        workflows: "<space-separated list>"   (double quoted)
-#        workflows: <space-separated list>     (unquoted)
-#    `grep -nE` keeps the line number so a multi-line value can still be told
-#    apart from a block/flow indicator below.
-gate_inputs="$(grep -nE '^[[:space:]]*workflows:[[:space:]]*[^[:space:]]' "${gate_stripped}" || true)"
-gate_input_count="$(printf '%s\n' "${gate_inputs}" | grep -c . || true)"
-case "${gate_input_count}" in
-    0)
-        fail "${GATE_WORKFLOW} declares no workflow list. Expected exactly one input listing the workflow paths space-separated, either quoted ('workflows: \"<paths>\"') or unquoted ('workflows: <paths>')."
-        ;;
-    1) ;;
-    *)
-        fail "${GATE_WORKFLOW} declares ${gate_input_count} 'workflows:' inputs; expected exactly one (the action input)."
-        ;;
-esac
-
-# Everything after `workflows:`, with the `grep -n` prefix removed and the
-# surrounding whitespace trimmed.
-gate_workflows_value="$(printf '%s\n' "${gate_inputs}" \
-    | sed -E 's/^[0-9]+:[[:space:]]*workflows:[[:space:]]*//' \
-    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-
-case "${gate_workflows_value}" in
-    '|'|'>'|'['|'{'|'|-'|'>-')
-        fail "${GATE_WORKFLOW}'s 'workflows:' input must be a single-line scalar (quoted or unquoted) listing the workflow paths space-separated; it is a YAML block or flow indicator ('${gate_workflows_value}') instead."
-        ;;
-esac
-
-# Strip one pair of surrounding double or single quotes if present.
-if [[ "${gate_workflows_value}" == \"*\" && ${#gate_workflows_value} -ge 2 ]]; then
-    gate_workflows_value="${gate_workflows_value:1:${#gate_workflows_value}-2}"
-elif [[ "${gate_workflows_value}" == \'*\' && ${#gate_workflows_value} -ge 2 ]]; then
-    gate_workflows_value="${gate_workflows_value:1:${#gate_workflows_value}-2}"
-fi
-
-printf '%s\n' "${gate_workflows_value}" | split_list > "${gate_list}"
 
 # Lockfile workflow keys: top-level `workflows:` map up to `dependencies:`.
 # The trailing `.*` accepts both `'path':` and `'path': []`.
@@ -171,28 +146,25 @@ report_diff() {
     fi
 }
 
-# 4. The gate's list must equal WORKFLOWS as a set, both directions.
-report_diff "${action_list}" "${gate_list}" \
-    "passed to the action but absent from ${GATE_WORKFLOW}" \
-    "${GATE_WORKFLOW} lists it but it was not passed to the action"
-
-# 5. The gate's list must equal the lockfile keys as a set, both directions.
-report_diff "${lock_list}" "${gate_list}" \
-    "${LOCKFILE} lists it but ${GATE_WORKFLOW} does not" \
-    "${GATE_WORKFLOW} lists it but it is absent from ${LOCKFILE}"
+# 3. The list the action receives must equal the lockfile keys as a set, both
+#    directions. The gate YAML is not consulted: the action input is the
+#    resolved value the caller's step already handed over.
+report_diff "${action_list}" "${lock_list}" \
+    "passed to the action but absent from ${LOCKFILE}" \
+    "${LOCKFILE} lists it but it was not passed to the action"
 
 if (( diff_found )); then
     exit 1
 fi
 
-# 6. Every gate path must exist on disk.
+# 4. Every path passed to the action must exist on disk.
 while IFS= read -r path; do
     if [ ! -f "${GITHUB_WORKSPACE%/}/${path}" ]; then
-        fail "workflow '${path}' is listed in ${GATE_WORKFLOW} but does not exist under '${GITHUB_WORKSPACE}'."
+        fail "workflow '${path}' is passed to the action but does not exist under '${GITHUB_WORKSPACE}'."
     fi
-done < "${gate_list}"
+done < "${action_list}"
 
-# 7. Excluded workflows must not appear anywhere. The length check keeps the
+# 5. Excluded workflows must not appear anywhere. The length check keeps the
 #    expansion safe under `set -u` when EXCLUDED_WORKFLOWS is empty.
 excluded=()
 if [ -n "${EXCLUDED_WORKFLOWS}" ]; then
@@ -200,9 +172,6 @@ if [ -n "${EXCLUDED_WORKFLOWS}" ]; then
 fi
 if (( ${#excluded[@]} > 0 )); then
     for entry in "${excluded[@]}"; do
-        if grep -Fxq -- "${entry}" "${gate_list}"; then
-            fail "excluded workflow '${entry}' must not be listed in ${GATE_WORKFLOW}."
-        fi
         if grep -Fxq -- "${entry}" "${lock_list}"; then
             fail "excluded workflow '${entry}' must not appear in the lockfile ${LOCKFILE}."
         fi
@@ -212,7 +181,7 @@ if (( ${#excluded[@]} > 0 )); then
     done
 fi
 
-# 8. The gate must re-run when a composite action changes: composite edits
+# 6. The gate must re-run when a composite action changes: composite edits
 #    change the pins recorded in the lockfile. This is only true for repos that
 #    actually have composites, so the requirement is conditional on the
 #    workspace having a .github/actions directory: repos with composites must
@@ -248,33 +217,73 @@ awk '
 ' "${gate_stripped}" \
     | sed -E "s/^'(.*)'$/\1/; s/^\"(.*)\"$/\1/" > "${gate_pr_paths}"
 
+# Does a negated path filter overlap the '.github/actions' directory? Overlap
+# is decided by path prefix, conservatively: a negated entry that cannot be
+# proven disjoint is treated as conflicting. Returns 0 (conflicting) or 1.
+negation_overlaps_composite_paths() {
+    local pattern="${1#!}"
+    local composite_dir='.github/actions'
+    pattern="${pattern#/}"
+    pattern="${pattern%/**}"
+    pattern="${pattern%/}"
+    # An empty remainder, a bare wildcard, or a brace set matches unknown
+    # paths, so overlap with '.github/actions' cannot be ruled out.
+    case "${pattern}" in
+        '' | '*' | '**' | *'{'*) return 0 ;;
+    esac
+    # '<remainder>' or '<remainder>/*' is a prefix of '.github/actions/...'
+    # when the remainder equals '.github' or '.github/actions'.
+    case "${composite_dir}" in
+        "${pattern}" | "${pattern}"/*) return 0 ;;
+    esac
+    return 1
+}
+
 if [ -d "${GITHUB_WORKSPACE%/}/.github/actions" ]; then
     # A later, ordered negation cancels an earlier inclusion, so the mere
     # presence of '.github/actions/**' is not enough: with a negation such as
-    # `- '!.github/actions/**'` composite-only edits would no longer run the
-    # gate while the positive-entry check still passed. Unrelated negations
-    # (e.g. '!docs/**') are left alone.
-    negated_composite_paths="$(grep -E '^!' "${gate_pr_paths}" | grep -F -- '.github/actions' || true)"
-    if [ -n "${negated_composite_paths}" ]; then
-        fail "${GATE_WORKFLOW} negates '.github/actions' under pull_request.paths ('${negated_composite_paths}'). That negation cancels the required trigger, so editing a composite action would no longer run the gate; remove the negated entry."
-    fi
+    # `- '!.github/actions/**'`, or an ancestor glob such as
+    # `- '!.github/**'`, composite-only edits would no longer run the gate
+    # while the positive-entry check still passed. Negations that cannot
+    # overlap (e.g. '!docs/**') are left alone.
+    while IFS= read -r negated; do
+        if [ -z "${negated}" ]; then
+            continue
+        fi
+        if negation_overlaps_composite_paths "${negated}"; then
+            fail "${GATE_WORKFLOW} negates '${negated}' under pull_request.paths. That negation can cancel the required '.github/actions/**' trigger (an ancestor glob such as '!.github/**' or a brace set whose overlap cannot be ruled out counts too), so editing a composite action would no longer run the gate; remove the negated entry."
+        fi
+    done < <(grep -E '^!' "${gate_pr_paths}" || true)
     if ! grep -Fxq -- '.github/actions/**' "${gate_pr_paths}"; then
         fail "${GATE_WORKFLOW} must list '.github/actions/**' under pull_request.paths: editing a composite action changes the pins recorded in ${LOCKFILE}, so the gate has to run on those edits."
     fi
 fi
 
-# 9. The gate must never silence the verifier outside a comment.
+# 7. The gate must never silence the verifier.
+#
+# (a) The RESOLVED input is what the runner and the action actually see, so an
+#     expression such as `${{ true }}` or a variable that evaluates truthy is
+#     caught here even though no literal in the file is truthy.
+resolved_ignore_local_actions="$(printf '%s' "${IGNORE_LOCAL_ACTIONS}" | tr '[:upper:]' '[:lower:]')"
+case "${resolved_ignore_local_actions}" in
+    true | yes | on | 1)
+        fail "the action's resolved 'ignore-local-actions' input is truthy ('${IGNORE_LOCAL_ACTIONS}'). That makes the verifier pass while the GitHub Actions runner still enforces the lockfile, so jobs fail with 'lockfile missing pin for <action>'. Remove the input; if your gate genuinely cannot follow the standard shape, set 'check-gate-coverage: false' instead."
+        ;;
+esac
+
+# (b) The CLI flag, outside a comment.
 if grep -Eq -- '--ignore[-_]local[-_]actions' "${gate_stripped}"; then
     fail "${GATE_WORKFLOW} enables silencing the verifier outside a comment with the '--ignore-local-actions' CLI flag. Remove it so the gate actually blocks unverifiable local composite actions."
 fi
 
-# Quoted values are unwrapped so that `ignore-local-actions: 'true'` and
-# `ignore-local-actions: "yes"` are caught, while false/no/off/0 pass.
+# (c) The literal YAML input. Quoted values are unwrapped so that
+#     `ignore-local-actions: 'true'` and `ignore-local-actions: "yes"` are
+#     caught, while false/no/off/0 pass.
 gate_unquoted="${tmp_dir}/gate.unquoted"
 sed -E "s/[\"']//g" "${gate_stripped}" > "${gate_unquoted}"
 if grep -Eiq -- 'ignore[-_]local[-_]actions:[[:space:]]*(true|yes|on|1)([[:space:]]|$)' "${gate_unquoted}"; then
     fail "${GATE_WORKFLOW} enables silencing the verifier by setting the 'ignore-local-actions' input to a truthy value. Set it to false or remove it so the gate blocks unverifiable local composite actions."
 fi
 
-onboarded="$(wc -l < "${gate_list}" | tr -d ' ')"
-echo "gate-coverage: OK: ${onboarded} onboarded workflows; gate, action input, and lockfile agree"
+onboarded="$(wc -l < "${action_list}" | tr -d ' ')"
+echo "gate-coverage: OK: ${onboarded} onboarded workflows; action input and lockfile agree"

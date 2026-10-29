@@ -63,6 +63,7 @@ runs:
         GATE_WORKFLOW: ${{ inputs.gate-workflow }}
         EXCLUDED_WORKFLOWS: ${{ inputs.excluded-workflows }}
         GITHUB_WORKSPACE: ${{ github.workspace }}
+        IGNORE_LOCAL_ACTIONS: ${{ inputs.ignore-local-actions }}
       run: bash "${{ github.action_path }}/scripts/gate-coverage.sh"
     - name: Verify actions lockfile
       shell: bash

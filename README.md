@@ -65,31 +65,33 @@ a repo has actually onboarded.
 
 ## Coverage check
 
-Before any network call, the action asserts that the three descriptions of "what
+Before any network call, the action asserts that the two descriptions of "what
 is onboarded" agree, so a gate cannot be green for a set of workflows nobody
 declared:
 
-- The caller's gate workflow `workflows:` input, the `workflows:` input passed to
-  this action, and the `workflows:` keys in `actions.lock` must agree **as sets
-  in both directions**. A path in one list but not another fails, and the error
-  names the path and the list it is missing from. The `workflows:` input may be
-  written as a quoted or an unquoted single-line scalar
-  (`workflows: "a.yml b.yml"` or `workflows: a.yml b.yml`); a YAML block or flow
-  indicator (`|`, `>`, `[`, `{`) is rejected.
+- The `workflows:` value the action **receives** and the `workflows:` keys in
+  `actions.lock` must agree **as sets in both directions**. A path in one list
+  but not the other fails, and the error names the path and the list it is
+  missing from. The caller's YAML is **not** parsed for that value: the resolved
+  action input is compared directly, so a second `workflows:` key in the same
+  file (such as a `workflow_run: workflows: [Build]` trigger) is irrelevant.
 - Every listed path must exist in the workspace.
-- No `excluded-workflows` entry may appear in any of the three lists.
+- No `excluded-workflows` entry may appear in any list.
 - `.github/actions/**` must be in the gate's `pull_request.paths` **when the
   repository has composites**. A repo with a `.github/actions` directory must
   re-run the gate when a composite changes; a repo without one is not forced to
-  carry a dead path filter. Because `paths` is ordered, a later negation that
-  cancels `.github/actions/**` (for example `- '!.github/actions/**'`) is
-  rejected even when the positive entry is present — it would leave composite
-  edits not running the gate.
-- The gate may never silence the verifier — neither the `--ignore-local-actions`
-  CLI flag nor a truthy `ignore-local-actions` YAML input (`true`/`yes`/`on`/`1`,
-  quoted or unquoted). An explicit `ignore-local-actions: false` keeps
-  verification on and is accepted. Comments that merely mention the flag are
-  ignored.
+  carry a dead path filter. Because `paths` is ordered, a negation that could
+  cancel `.github/actions/**` is rejected even when the positive entry is
+  present. That includes an exact `- '!.github/actions/**'`, an ancestor glob
+  such as `- '!.github/**'`, and brace sets whose overlap cannot be ruled out;
+  unrelated negations such as `- '!docs/**'` pass.
+- The gate may never silence the verifier. A truthy **resolved**
+  `ignore-local-actions` input fails the check — which is what catches
+  `ignore-local-actions: ${{ true }}` and values supplied through variables,
+  since the resolved value is what matters. The `--ignore-local-actions` CLI
+  flag and a truthy literal input (`true`/`yes`/`on`/`1`, quoted or unquoted)
+  also fail. An explicit `ignore-local-actions: false` keeps verification on and
+  is accepted. Comments that merely mention the flag are ignored.
 
 The check reads only `sed`/`grep`/`awk`/coreutils, so it needs no extra tooling.
 Set `check-gate-coverage: false` to skip it for a non-standard gate; the verifier

@@ -4,6 +4,10 @@
 # Every test builds a throwaway caller repo under the bats temp dir (a gate
 # workflow, a lockfile and the workflow files those two reference) and drives
 # the script with env overrides. No network, no docker, no gh.
+#
+# The script takes the workflow list from the action's `workflows:` input
+# (WORKFLOWS), never from the gate YAML, so the fixtures keep the gate's input
+# in sync with WORKFLOWS unless a test deliberately changes one of them.
 
 SCRIPT="scripts/gate-coverage.sh"
 
@@ -13,9 +17,10 @@ setup() {
     LOCK="${WORKDIR}/.github/workflows/actions.lock"
 
     mkdir -p "${WORKDIR}/.github/workflows"
-    # Default fixture HAS a composite action: assertion 8 then applies, and the
-    # composite-drop test below exercises it. The new test removes the directory
-    # again to prove the assertion is skipped for composite-free repos.
+    # Default fixture HAS a composite action: assertion 6 then applies, and the
+    # composite-drop test below exercises it. The final test removes the
+    # directory again to prove the assertion is skipped for composite-free
+    # repos.
     mkdir -p "${WORKDIR}/.github/actions/example"
     cat > "${WORKDIR}/.github/actions/example/action.yml" <<'YAML'
 name: Example composite
@@ -37,10 +42,11 @@ YAML
     export LOCKFILE=".github/workflows/actions.lock"
     export WORKFLOWS=".github/workflows/a.yml .github/workflows/b.yml"
     export EXCLUDED_WORKFLOWS=""
+    unset IGNORE_LOCAL_ACTIONS
 }
 
 teardown() {
-    unset GITHUB_WORKSPACE GATE_WORKFLOW LOCKFILE WORKFLOWS EXCLUDED_WORKFLOWS
+    unset GITHUB_WORKSPACE GATE_WORKFLOW LOCKFILE WORKFLOWS EXCLUDED_WORKFLOWS IGNORE_LOCAL_ACTIONS
     rm -rf "${WORKDIR:-}"
 }
 
@@ -89,12 +95,14 @@ write_workflow() {
     printf 'name: %s\non: pull_request\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo noop\n' "${path}" > "${WORKDIR}/${path}"
 }
 
-@test "passes when the gate, the action input and the lockfile agree" {
+# 1
+@test "passes when the action input and the lockfile agree" {
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
 }
 
+# 2
 @test "fails and names the lockfile when it does not exist" {
     rm -f "${LOCK}"
     run bash "$SCRIPT"
@@ -102,6 +110,7 @@ write_workflow() {
     [[ "$output" == *"actions.lock"* ]]
 }
 
+# 3
 @test "fails with an actionable fix when the gate workflow does not exist" {
     rm -f "${GATE}"
     run bash "$SCRIPT"
@@ -109,8 +118,8 @@ write_workflow() {
     [[ "$output" == *"gate-workflow"* || "$output" == *"check-gate-coverage"* ]]
 }
 
-@test "fails naming the path when the gate lists a workflow the lockfile does not" {
-    write_gate ".github/workflows/a.yml .github/workflows/b.yml .github/workflows/c.yml"
+# 4
+@test "fails naming the path when the action input lists a workflow the lockfile does not" {
     write_workflow ".github/workflows/c.yml"
     export WORKFLOWS=".github/workflows/a.yml .github/workflows/b.yml .github/workflows/c.yml"
     run bash "$SCRIPT"
@@ -118,40 +127,38 @@ write_workflow() {
     [[ "$output" == *"c.yml"* ]]
 }
 
-@test "fails naming the path when the lockfile locks a workflow the gate does not list" {
+# 5
+@test "fails naming the path when the lockfile locks a workflow not passed to the action" {
     sed -i "s|^dependencies:|    '.github/workflows/d.yml': []\ndependencies:|" "${LOCK}"
     run bash "$SCRIPT"
     [ "$status" -ne 0 ]
     [[ "$output" == *"d.yml"* ]]
 }
 
-@test "fails naming the path when the action input differs from the gate list" {
-    export WORKFLOWS=".github/workflows/a.yml"
-    run bash "$SCRIPT"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"b.yml"* ]]
-}
-
-@test "fails when a workflow listed in the gate does not exist on disk" {
+# 6
+@test "fails when a workflow passed to the action does not exist on disk" {
     rm -f "${WORKDIR}/.github/workflows/b.yml"
     run bash "$SCRIPT"
     [ "$status" -ne 0 ]
     [[ "$output" == *"b.yml"* ]]
 }
 
-@test "fails when an excluded workflow is still listed in the gate" {
+# 7
+@test "fails when an excluded workflow is still passed to the action" {
     export EXCLUDED_WORKFLOWS=".github/workflows/b.yml"
     run bash "$SCRIPT"
     [ "$status" -ne 0 ]
     [[ "$output" == *"excluded workflow '.github/workflows/b.yml'"* ]]
 }
 
+# 8
 @test "passes when EXCLUDED_WORKFLOWS names a workflow absent from every list" {
     export EXCLUDED_WORKFLOWS=".github/workflows/z.yml"
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
 }
 
+# 9
 @test "fails explaining composite edits when the gate drops '.github/actions/**'" {
     sed -i "/\\.github\\/actions\\/\\*\\*/d" "${GATE}"
     run bash "$SCRIPT"
@@ -159,6 +166,7 @@ write_workflow() {
     [[ "$output" == *"composite"* ]]
 }
 
+# 10
 @test "passes when the repo has no .github/actions directory, even without the paths entry" {
     rm -rf "${WORKDIR}/.github/actions"
     sed -i "/\\.github\\/actions\\/\\*\\*/d" "${GATE}"
@@ -167,6 +175,7 @@ write_workflow() {
     [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
 }
 
+# 11
 @test "fails when the gate passes the --ignore-local-actions CLI flag" {
     printf '      - name: verify locally\n        run: gh actions-lock --verify --ignore-local-actions\n' >> "${GATE}"
     run bash "$SCRIPT"
@@ -174,13 +183,41 @@ write_workflow() {
     [[ "$output" == *"ignore-local-actions"* ]]
 }
 
-@test "REGRESSION: fails when the gate sets the ignore-local-actions YAML input key" {
+# 12
+@test "fails when the gate sets the literal unquoted ignore-local-actions: true" {
     sed -i 's|^\([[:space:]]*workflows: "\)|          ignore-local-actions: true\n\1|' "${GATE}"
     run bash "$SCRIPT"
     [ "$status" -ne 0 ]
     [[ "$output" == *"ignore-local-actions"* ]]
 }
 
+# 13
+@test "REGRESSION: fails when the gate sets ignore-local-actions: 'true' quoted" {
+    sed -i "s|^\([[:space:]]*workflows: \"\)|          ignore-local-actions: 'true'\n\1|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ignore-local-actions"* ]]
+}
+
+# 14
+@test "passes when the gate explicitly sets ignore-local-actions: false" {
+    sed -i 's|^\([[:space:]]*workflows: "\)|          ignore-local-actions: false\n\1|' "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
+}
+
+# 15
+@test "REGRESSION: fails when the RESOLVED ignore-local-actions input is truthy" {
+    # Simulates `ignore-local-actions: \${{ true }}` or a variable: the file
+    # contains no truthy literal, only the resolved value the action receives.
+    export IGNORE_LOCAL_ACTIONS="TRUE"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"resolved"* ]]
+}
+
+# 16
 @test "passes when a comment merely mentions ignore-local-actions" {
     printf '# NOTE: never pass --ignore-local-actions or set ignore-local-actions: true here\n' >> "${GATE}"
     run bash "$SCRIPT"
@@ -188,6 +225,7 @@ write_workflow() {
     [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
 }
 
+# 17
 @test "fails when WORKFLOWS is unset or empty" {
     unset WORKFLOWS
     run bash "$SCRIPT"
@@ -198,17 +236,7 @@ write_workflow() {
     [ "$status" -ne 0 ]
 }
 
-@test "fails when the gate declares two workflows inputs" {
-    cat >> "${GATE}" <<'YAML'
-      - uses: southernlights-tech/actions-lock-verify-action@v1
-        with:
-          workflows: ".github/workflows/a.yml"
-YAML
-    run bash "$SCRIPT"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"expected exactly one"* ]]
-}
-
+# 18
 @test "REGRESSION: compares a lockfile entry written as 'path': [] correctly" {
     cat > "${LOCK}" <<'LOCK'
 version: '1'
@@ -225,22 +253,31 @@ LOCK
     [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
 }
 
-@test "passes when the gate declares an unquoted workflows scalar" {
-    sed -i 's|^\([[:space:]]*workflows: \)"\(.*\)"$|\1\2|' "${GATE}"
-    # Sanity: the input really is unquoted.
-    grep -q '^[[:space:]]*workflows: \.github/workflows/a\.yml \.github/workflows/b\.yml$' "${GATE}"
-    run bash "$SCRIPT"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
-}
-
-@test "REGRESSION: rejects a negation that cancels the composite path" {
+# 19
+@test "REGRESSION: rejects an exact negation of '.github/actions/**'" {
     sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!.github/actions/**'|" "${GATE}"
     run bash "$SCRIPT"
     [ "$status" -ne 0 ]
     [[ "$output" == *"negat"* && "$output" == *"cancel"* ]]
 }
 
+# 20
+@test "REGRESSION: rejects an ancestor negation '!.github/**' that cancels the composite trigger" {
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!.github/**'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"!.github/**"* && "$output" == *"cancel"* ]]
+}
+
+# 21
+@test "REGRESSION: passes when the negation is unrelated, e.g. '!docs/**'" {
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!docs/**'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
+}
+
+# 22
 @test "passes when paths items sit at the same indentation as the key" {
     sed -i "/^      - '\.github\//s/^  //" "${GATE}"
     # Sanity: the sequence items now align with `paths:`.
@@ -250,16 +287,32 @@ LOCK
     [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
 }
 
-@test "passes when the gate explicitly sets ignore-local-actions: false" {
-    sed -i 's|^\([[:space:]]*workflows: "\)|          ignore-local-actions: false\n\1|' "${GATE}"
+# 23
+@test "REGRESSION: an unrelated workflow_run 'workflows:' trigger is not a second action input" {
+    cat > "${GATE}" <<'YAML'
+name: Actions lockfile verify
+
+on:
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
+  pull_request:
+    paths:
+      - '.github/workflows/actions.lock'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: southernlights-tech/actions-lock-verify-action@v1
+        with:
+          workflows: ".github/workflows/a.yml .github/workflows/b.yml"
+YAML
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
-}
-
-@test "REGRESSION: fails when the gate sets ignore-local-actions: 'true' quoted" {
-    sed -i "s|^\([[:space:]]*workflows: \"\)|          ignore-local-actions: 'true'\n\1|" "${GATE}"
-    run bash "$SCRIPT"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"ignore-local-actions"* ]]
 }
