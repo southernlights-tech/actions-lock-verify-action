@@ -10,16 +10,41 @@ inputs:
   workflows:
     description: "Space-separated list of workflow paths to verify, e.g. '.github/workflows/release.yml .github/workflows/build.yml'."
     required: true
+  gate-workflow:
+    description: >-
+      Path to the caller's lockfile gate workflow, relative to the workspace.
+      The coverage check asserts this file's `workflows:` input, its path
+      filters, and the lockfile all agree. Override only if your gate file is
+      not named actions-lock-verify.yaml.
+    required: false
+    default: ".github/workflows/actions-lock-verify.yaml"
+  excluded-workflows:
+    description: >-
+      Space-separated workflow paths deliberately kept out of the lockfile and
+      out of the gate because a ref they reach cannot be resolved with the
+      repo-scoped GITHUB_TOKEN. The coverage check asserts none of these appear
+      in either list.
+    required: false
+    default: ""
+  check-gate-coverage:
+    description: >-
+      Assert that the caller's gate workflow and actions.lock agree before
+      verifying. Set to "false" only for repositories whose gate does not follow
+      the standard shape; the verifier itself still runs.
+    required: false
+    default: "true"
   extension-pin:
     description: "Pinned version of github/gh-actions-lock. Requires v0.3.0 or newer for the ignore-local-actions input."
     required: false
     default: "v0.4.0"
   ignore-local-actions:
     description: >-
-      Pass --ignore-local-actions to the verifier so workflows that call
-      same-repo composite actions (uses: ./…) are kept as warnings instead of
-      blocking the verify. Enable this only for repositories that rely on local
-      composite actions.
+      DEPRECATED and never a fix for composite actions: this silences the
+      verifier while the GitHub Actions runner still enforces the lockfile at
+      job start, so the job then fails with "lockfile missing pin for <action>".
+      Referencing same-repo composites as `$/...` (and onboarding them) is the
+      supported path. Kept for backwards compatibility; emits a warning and will
+      be removed in the next major version.
     required: false
     default: "false"
   token:
@@ -30,6 +55,16 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Check gate coverage
+      if: ${{ inputs.check-gate-coverage == 'true' }}
+      shell: bash
+      env:
+        WORKFLOWS: ${{ inputs.workflows }}
+        GATE_WORKFLOW: ${{ inputs.gate-workflow }}
+        EXCLUDED_WORKFLOWS: ${{ inputs.excluded-workflows }}
+        GITHUB_WORKSPACE: ${{ github.workspace }}
+        IGNORE_LOCAL_ACTIONS: ${{ inputs.ignore-local-actions }}
+      run: bash "${{ github.action_path }}/scripts/gate-coverage.sh"
     - name: Verify actions lockfile
       shell: bash
       env:
@@ -37,4 +72,8 @@ runs:
         EXTENSION_PIN: ${{ inputs.extension-pin }}
         IGNORE_LOCAL_ACTIONS: ${{ inputs.ignore-local-actions }}
         GH_TOKEN: ${{ inputs.token || github.token }}
-      run: bash "${{ github.action_path }}/scripts/verify-actions-lock.sh"
+      run: |
+        if [ "${IGNORE_LOCAL_ACTIONS}" = "true" ]; then
+          echo "::warning title=ignore-local-actions is deprecated::This silences the verifier but the runner still enforces the lockfile; jobs will fail with 'lockfile missing pin for <action>'. Reference same-repo composites as \$/... instead."
+        fi
+        bash "${{ github.action_path }}/scripts/verify-actions-lock.sh"

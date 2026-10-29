@@ -20,6 +20,11 @@ EXTENSION_PIN="${EXTENSION_PIN:-v0.4.0}"
 WORKFLOWS="${WORKFLOWS:?WORKFLOWS must be set (space-separated workflow paths)}"
 IGNORE_LOCAL_ACTIONS="${IGNORE_LOCAL_ACTIONS:-false}"
 
+# Normalise ALL whitespace (spaces, tabs, newlines) to single spaces before
+# splitting, so a multi-line `workflows: |` block scalar is fully honoured
+# instead of being truncated to its first line. scripts/gate-coverage.sh uses
+# the same normalisation deliberately: the two steps must agree on the paths.
+WORKFLOWS="$(printf '%s' "${WORKFLOWS}" | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')"
 read -r -a paths <<< "${WORKFLOWS}"
 if (( ${#paths[@]} == 0 )); then
   echo "::error::verify-actions-lock: WORKFLOWS is empty; nothing to verify." >&2
