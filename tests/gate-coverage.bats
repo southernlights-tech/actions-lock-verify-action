@@ -608,3 +608,117 @@ SH
     [[ "$output" == *'!.github/actions/[abc'* ]]
     [[ "$output" != *"AFTER-GUARD"* ]]
 }
+
+# 38
+@test "REGRESSION: a '#' inside a quoted paths entry is data, not a comment" {
+    # `sed 's/#.*//'` cut the entry at the '#', so the exclusion never matched
+    # and the check reported OK while GitHub really excluded that composite:
+    # a false green. YAML only starts a comment at a '#' that is outside a
+    # quoted scalar and at line start or after whitespace; here it is inside
+    # single quotes and preceded by a path character, so it is data.
+    mkdir -p "${WORKDIR}/.github/actions/foo#bar"
+    cat > "${WORKDIR}/.github/actions/foo#bar/action.yml" <<'YAML'
+name: Hash composite
+description: Composite under a directory whose name contains '#'.
+runs:
+  using: composite
+  steps:
+    - run: echo hash
+      shell: bash
+YAML
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!.github/actions/foo#bar/**'|" "${GATE}"
+    # The fixture really holds the '#' inside the quoted entry.
+    grep -qF "'!.github/actions/foo#bar/**'" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *".github/actions/foo#bar/action.yml"* ]]
+    [[ "$output" == *"!.github/actions/foo#bar/**"* ]]
+}
+
+# 39
+@test "REGRESSION: a double-quoted escaped dot is decoded, so the exclusion is caught" {
+    # The YAML source carries a DOUBLE backslash, so YAML's double-quoted
+    # decoding yields `action\.yml` - the same pattern as single-quoted test 33.
+    # Without decoding the evaluator saw a literal backslash-backslash and the
+    # exclusion never matched: another false green.
+    cat > "${GATE}" <<'YAML'
+name: Actions lockfile verify
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/actions.lock'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - "!.github/actions/example/action\\.yml"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: southernlights-tech/actions-lock-verify-action@v1
+        with:
+          workflows: ".github/workflows/a.yml .github/workflows/b.yml"
+YAML
+    # Two backslashes in the source (the decoded scalar has one).
+    grep -qF 'action\\.yml' "${GATE}"
+    test -f "${WORKDIR}/.github/actions/example/action.yml"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *".github/actions/example/action.yml"* ]]
+    [[ "$output" == *'!.github/actions/example/action\.yml'* ]]
+}
+
+# 40
+@test "REGRESSION: an unsupported escape in a double-quoted entry fails closed" {
+    # `\t` is not one of the escapes a GitHub path pattern can carry, so the
+    # decoded value cannot be reproduced reliably: fail closed rather than
+    # evaluate a pattern that may never match (a false green).
+    cat > "${GATE}" <<'YAML'
+name: Actions lockfile verify
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/actions.lock'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - "!.github/actions/example/action\tyml"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: southernlights-tech/actions-lock-verify-action@v1
+        with:
+          workflows: ".github/workflows/a.yml .github/workflows/b.yml"
+YAML
+    grep -qF 'action\tyml' "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot be evaluated"* ]]
+    [[ "$output" == *'action\tyml'* ]]
+}
+
+# 41
+@test "REGRESSION: every entry of a multiline EXCLUDED_WORKFLOWS is checked" {
+    # `read -r -a excluded <<< "$EXCLUDED_WORKFLOWS"` only reads the FIRST
+    # line, so an `excluded-workflows: |` block scalar silently dropped every
+    # entry after it - an onboarded workflow that WAS excluded went unnoticed.
+    export EXCLUDED_WORKFLOWS=$'.github/workflows/z.yml\n.github/workflows/b.yml'
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"excluded workflow '.github/workflows/b.yml'"* ]]
+
+    # Reverse order: the onboarded path is now the FIRST line and the absent
+    # one the second. The result must be identical - order does not matter,
+    # which proves the first-line truncation was the bug.
+    export EXCLUDED_WORKFLOWS=$'.github/workflows/b.yml\n.github/workflows/z.yml'
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"excluded workflow '.github/workflows/b.yml'"* ]]
+}

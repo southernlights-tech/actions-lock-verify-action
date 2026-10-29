@@ -38,8 +38,14 @@
 #     keys and make every later comparison wrong.
 #   * Set comparisons are order-insensitive: each list is split to one path
 #     per line and `sort -u`d before `comm` runs in both directions.
-#   * The `ignore[-_]local[-_]actions` assertion strips comments first
-#     (`sed 's/#.*//'`), so a comment that merely mentions the flag does not
+#   * Comments are stripped with a quote-aware AWK pass, not `sed 's/#.*//'`:
+#     YAML only starts a comment at a `#` that is outside any quoted scalar and
+#     is at the start of the line or preceded by whitespace. A `#` inside a
+#     quoted paths entry (e.g. `- '.github/actions/foo#bar/**'`) is data;
+#     dropping it truncated the entry, made the exclusion unmatchable and
+#     reported OK while GitHub really excluded the composite.
+#   * The `ignore[-_]local[-_]actions` assertion uses that stripped text, so a
+#     comment that merely mentions the flag does not
 #     trip the guard. It fails three ways: the RESOLVED input (env
 #     IGNORE_LOCAL_ACTIONS) being truthy, the CLI flag
 #     (`--ignore-local-actions`) appearing outside a comment, and the YAML
@@ -67,6 +73,10 @@
 #     preceding character) fail conservatively. The assertion is conditional: a
 #     repo with no `.github/actions` directory is not forced to carry a dead
 #     path filter, and emits nothing.
+#   * Paths entries are unquoted by quote style, because GitHub evaluates the
+#     DECODED scalar. A single-quoted entry has no escapes (strip the quotes
+#     only). A double-quoted entry decodes `\\` -> `\` and `\"` -> `"`; any
+#     other backslash escape cannot be decoded reliably and fails closed.
 #   * WORKFLOWS is split on ANY whitespace here. A multi-line `workflows: |`
 #     block scalar is therefore fully honoured. `scripts/verify-actions-lock.sh`
 #     normalises the same variable identically (collapse whitespace, then
@@ -124,9 +134,79 @@ if [ ! -f "${gate_path}" ]; then
     fail "gate workflow not found at '${GATE_WORKFLOW}' (resolved: '${gate_path}'). Set the action's 'gate-workflow:' input to your gate workflow's path, or set 'check-gate-coverage: false' to opt out."
 fi
 
-# Comments are stripped for every structural assertion below.
+# Comments are stripped for every structural assertion below. YAML's rule is
+# that a `#` only begins a comment when it is OUTSIDE any quoted scalar and is
+# either the first character of the line or preceded by a space/tab. Inside a
+# quoted scalar a `#` is data, and in a double-quoted scalar a backslash
+# escapes the next character (so `\"` does not end the scalar). `sed
+# 's/#.*//'` ignored both rules and truncated a quoted paths entry such as
+# `- '.github/actions/foo#bar/**'`, silently deleting an exclusion.
 gate_stripped="${tmp_dir}/gate.no-comments"
-sed 's/#.*//' "${gate_path}" > "${gate_stripped}"
+strip_comments_awk="${tmp_dir}/strip-yaml-comments.awk"
+cat > "${strip_comments_awk}" <<'AWK'
+# Strip YAML comments while preserving '#' that is data.
+#
+# Quote state is carried across lines because a YAML quoted flow scalar may span
+# lines. Carrying it can only keep a real comment (a stricter check), never drop
+# a data '#', so it cannot hide an exclusion.
+{
+    line = $0
+    out = ""
+    n = length(line)
+    i = 1
+    while (i <= n) {
+        c = substr(line, i, 1)
+        if (state == "single") {
+            # YAML escapes a single quote inside '...' by doubling it.
+            if (c == "'") {
+                if (substr(line, i + 1, 1) == "'") {
+                    out = out "''"
+                    i += 2
+                    continue
+                }
+                state = ""
+            }
+            out = out c
+            i++
+            continue
+        }
+        if (state == "double") {
+            if (c == "\\") {
+                out = out c substr(line, i + 1, 1)
+                i += 2
+                continue
+            }
+            if (c == "\"") state = ""
+            out = out c
+            i++
+            continue
+        }
+        # Outside any quoted scalar: '#' starts a comment only at line start or
+        # after whitespace.
+        if (c == "#") {
+            prev = (i == 1) ? "" : substr(line, i - 1, 1)
+            if (i == 1 || prev == " " || prev == "\t") break
+            out = out c
+            i++
+            continue
+        }
+        if (c == "'" || c == "\"") {
+            # A quote only OPENS a scalar at a token boundary, so an apostrophe
+            # inside a plain scalar ("Ashvin's") is not misread as one.
+            prev = (i == 1) ? "" : substr(line, i - 1, 1)
+            if (i == 1 || prev == " " || prev == "\t" || prev == ":" || \
+                prev == "-" || prev == "," || prev == "[" || prev == "{" || \
+                prev == "(") {
+                state = (c == "'") ? "single" : "double"
+            }
+        }
+        out = out c
+        i++
+    }
+    print out
+}
+AWK
+awk -f "${strip_comments_awk}" "${gate_path}" > "${gate_stripped}"
 
 # Lockfile workflow keys: top-level `workflows:` map up to `dependencies:`.
 # The trailing `.*` accepts both `'path':` and `'path': []`.
@@ -176,8 +256,14 @@ while IFS= read -r path; do
     fi
 done < "${action_list}"
 
-# 5. Excluded workflows must not appear anywhere. The length check keeps the
-#    expansion safe under `set -u` when EXCLUDED_WORKFLOWS is empty.
+# 5. Excluded workflows must not appear anywhere. Normalise ALL whitespace
+#    (spaces, tabs, newlines) to single spaces BEFORE splitting, so an
+#    `excluded-workflows: |` block scalar is fully honoured instead of being
+#    truncated to its first line. scripts/verify-actions-lock.sh normalises
+#    WORKFLOWS identically on purpose: the two steps must stay consistent about
+#    which paths they were given. The length check keeps the expansion safe
+#    under `set -u` when EXCLUDED_WORKFLOWS is empty.
+EXCLUDED_WORKFLOWS="$(printf '%s' "${EXCLUDED_WORKFLOWS}" | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')"
 excluded=()
 if [ -n "${EXCLUDED_WORKFLOWS}" ]; then
     read -r -a excluded <<< "${EXCLUDED_WORKFLOWS}"
@@ -204,10 +290,13 @@ fi
 #    filter_includes_path), not by pattern-matching entries: only that catches
 #    descendant and wildcard negations, where a positive '.github/actions/**'
 #    is present but a later, narrower exclusion removes the composites.
+gate_pr_paths_raw="${tmp_dir}/gate.pr-paths.raw"
 gate_pr_paths="${tmp_dir}/gate.pr-paths"
 # Sequence collection below is unchanged; the state-2 exit condition only has
 # to terminate the `paths:` block (dedent, or a non-'-' key at the same
 # indentation), which is why same-indent `- ` items are also accepted.
+# Entries are kept verbatim (quotes included) here: unquoting/decoding happens
+# below, where an undecodable double-quoted escape can fail closed.
 awk '
     {
         line = $0
@@ -234,8 +323,7 @@ awk '
             print value
         }
     }
-' "${gate_stripped}" \
-    | sed -E "s/^'(.*)'$/\1/; s/^\"(.*)\"$/\1/" > "${gate_pr_paths}"
+' "${gate_stripped}" > "${gate_pr_paths_raw}"
 
 # Sentinel printed by gha_path_pattern_to_regex for a pattern whose GitHub
 # semantics the evaluator cannot reproduce. Every caller MUST treat it as
@@ -354,6 +442,52 @@ fail_unevaluable() {
     local entry="${1}"
     fail "${GATE_WORKFLOW} has a pull_request.paths pattern that cannot be evaluated: '${entry}'. Brace sets ('{', '}'), character classes ('[', ']'), and a '?' or '+' quantifier without a single preceding character to quantify are not modelled by the coverage check, so it cannot prove that composite actions still trigger the gate; rewrite the filter using only '**', '*', literal paths, and '?'/'+' placed directly after a literal character."
 }
+
+# Unquote and decode each paths entry by quote style, because GitHub evaluates
+# the DECODED scalar, not the YAML source text:
+#   * SINGLE-quoted: YAML processes no escapes; strip the outer quotes only.
+#   * DOUBLE-quoted: only `\\` -> `\` and `\"` -> `"` can appear in a GitHub
+#     path pattern, so decode exactly those. Any other backslash escape
+#     (`\t`, `\n`, `\x`, `\u`, `\'`, a trailing `\`) cannot be decoded
+#     reliably; fail closed rather than evaluate the wrong pattern - an entry
+#     that silently never matches is a false green.
+#   * UNQUOTED: leave as-is.
+# The decoded value is what gha_path_pattern_to_regex consumes below. Decoding
+# (and therefore failing on an undecodable escape) only happens when the repo
+# actually has composites, matching the scope of the coverage assertion itself.
+if [ -d "${GITHUB_WORKSPACE%/}/.github/actions" ]; then
+    : > "${gate_pr_paths}"
+    while IFS= read -r entry; do
+        [ -n "${entry}" ] || continue
+        decoded="${entry}"
+        if [ "${#entry}" -ge 2 ] && [ "${entry:0:1}" = "'" ] && [ "${entry: -1}" = "'" ]; then
+            decoded="${entry:1:${#entry}-2}"
+        elif [ "${#entry}" -ge 2 ] && [ "${entry:0:1}" = '"' ] && [ "${entry: -1}" = '"' ]; then
+            inner="${entry:1:${#entry}-2}"
+            decoded=""
+            i=0
+            while (( i < ${#inner} )); do
+                c="${inner:i:1}"
+                if [ "${c}" != "\\" ]; then
+                    decoded+="${c}"
+                    i=$(( i + 1 ))
+                    continue
+                fi
+                next="${inner:i+1:1}"
+                if [ "${next}" = "\\" ]; then
+                    decoded+="\\"
+                elif [ "${next}" = '"' ]; then
+                    decoded+='"'
+                else
+                    # Includes the empty string (a trailing backslash).
+                    fail_unevaluable "${entry}"
+                fi
+                i=$(( i + 2 ))
+            done
+        fi
+        printf '%s\n' "${decoded}" >> "${gate_pr_paths}"
+    done < "${gate_pr_paths_raw}"
+fi
 
 # Returns 0 on match, 1 on no match, and fails the run on an invalid regex
 # rather than silently treating it as "no match" (a false green). `[[ =~ ]]`
