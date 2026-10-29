@@ -73,3 +73,14 @@ teardown() {
     run grep -F -- "actions-lock --verify --ignore-local-actions .github/workflows/a.yml" "$ARGS_FILE"
     [ "$status" -eq 0 ]
 }
+
+@test "passes every path when WORKFLOWS contains newlines" {
+    # REGRESSION: `read -a <<< "$WORKFLOWS"` used to read only the first line,
+    # so the remaining paths in a `workflows: |` block scalar were silently
+    # left unverified.
+    export WORKFLOWS=$'.github/workflows/a.yml\n.github/workflows/b.yml'
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -F "actions-lock --verify .github/workflows/a.yml .github/workflows/b.yml" "$ARGS_FILE"
+    [ "$status" -eq 0 ]
+}

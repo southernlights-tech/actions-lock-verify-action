@@ -77,14 +77,22 @@ declared:
   file (such as a `workflow_run: workflows: [Build]` trigger) is irrelevant.
 - Every listed path must exist in the workspace.
 - No `excluded-workflows` entry may appear in any list.
-- `.github/actions/**` must be in the gate's `pull_request.paths` **when the
-  repository has composites**. A repo with a `.github/actions` directory must
-  re-run the gate when a composite changes; a repo without one is not forced to
-  carry a dead path filter. Because `paths` is ordered, a negation that could
-  cancel `.github/actions/**` is rejected even when the positive entry is
-  present. That includes an exact `- '!.github/actions/**'`, an ancestor glob
-  such as `- '!.github/**'`, and brace sets whose overlap cannot be ruled out;
-  unrelated negations such as `- '!docs/**'` pass.
+- **When the repository has composites**, the gate's ordered `pull_request.paths`
+  filter is **evaluated** against every composite action file
+  (`.github/actions/**/action.yml` and `action.yaml`), the way GitHub applies it:
+  entries in order, the last matching entry wins, and a leading `!` re-excludes.
+  The check fails if any composite file would be excluded, so a descendant
+  exclusion (`- '!.github/actions/example/**'`) or a wildcard exclusion
+  (`- '!.github/*/**'`) is caught exactly like an ancestor one
+  (`- '!.github/**'`), even when a positive `- '.github/actions/**'` entry is
+  present. Unrelated negations such as `- '!docs/**'` pass. Path patterns are
+  evaluated with GitHub's documented semantics, including `?` (zero-or-one) and
+  `+` (one-or-more) as **quantifiers on the preceding character** rather than
+  character classes; patterns the check cannot model — brace sets (`{`/`}`),
+  character classes (`[`/`]`), or a `?`/`+` with no single preceding character
+  to quantify — fail conservatively with a "cannot be evaluated" error instead
+  of a false OK. A repo without a `.github/actions` directory is not forced to
+  carry a dead path filter.
 - The gate may never silence the verifier. A truthy **resolved**
   `ignore-local-actions` input fails the check — which is what catches
   `ignore-local-actions: ${{ true }}` and values supplied through variables,
@@ -92,6 +100,11 @@ declared:
   flag and a truthy literal input (`true`/`yes`/`on`/`1`, quoted or unquoted)
   also fail. An explicit `ignore-local-actions: false` keeps verification on and
   is accepted. Comments that merely mention the flag are ignored.
+- The `workflows:` input may be a multi-line `workflows: |` block scalar (one
+  path per line). Both this check and `verify-actions-lock.sh` normalise the
+  same value identically — all whitespace collapsed, then split — so a block
+  scalar is fully honoured and can never be silently truncated to its first
+  line.
 
 The check reads only `sed`/`grep`/`awk`/coreutils, so it needs no extra tooling.
 Set `check-gate-coverage: false` to skip it for a non-standard gate; the verifier

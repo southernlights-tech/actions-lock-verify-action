@@ -316,3 +316,295 @@ YAML
     [ "$status" -eq 0 ]
     [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
 }
+
+# 24
+@test "REGRESSION: rejects a descendant negation '!.github/actions/example/**'" {
+    # The positive '.github/actions/**' entry is present, so a prefix check
+    # passes; the filter must be evaluated to see the later exclusion.
+    test -f "${WORKDIR}/.github/actions/example/action.yml"
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!.github/actions/example/**'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *".github/actions/example/action.yml"* ]]
+    [[ "$output" == *"!.github/actions/example/**"* ]]
+}
+
+# 25
+@test "REGRESSION: rejects a wildcard negation '!.github/*/**'" {
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!.github/*/**'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *".github/actions/example/action.yml"* ]]
+    [[ "$output" == *"!.github/*/**"* ]]
+}
+
+# 26
+@test "passes when a negation excludes an unrelated tree, e.g. '!/docs/**'" {
+    # Leading-slash form: an unrelated pattern must not match a composite path
+    # even after normalisation. ('!docs/**' is already test 21.)
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!/docs/**'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
+}
+
+# 27
+@test "supports a multiline WORKFLOWS value" {
+    # A `workflows: |` block scalar hands one path per line to the step. Both
+    # this script and verify-actions-lock.sh split on any whitespace.
+    export WORKFLOWS=$'.github/workflows/a.yml\n.github/workflows/b.yml'
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
+}
+
+# 28
+@test "fails conservatively when a paths pattern cannot be evaluated (brace set)" {
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!{.github/actions}/**'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot be evaluated"* ]]
+    [[ "$output" == *"{.github/actions}/**"* ]]
+}
+
+# 29
+@test "REGRESSION: '?' is a quantifier on the preceding character, so a matching exclusion is caught" {
+    # GitHub reads 'action.ymm?l' as 'action.ym' + 'm?' + 'l', which matches
+    # 'action.yml' (zero-or-one 'm'). Modelling '?' as "one non-slash char"
+    # made this exclusion invisible: a false green.
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!.github/actions/example/action.ymm?l'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *".github/actions/example/action.yml"* ]]
+    [[ "$output" == *"!.github/actions/example/action.ymm?l"* ]]
+}
+
+# 30
+@test "REGRESSION: '+' is a quantifier on the preceding character, so a matching exclusion is caught" {
+    # 'action.ym+l' means one-or-more 'm', so it matches 'action.yml'.
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!.github/actions/example/action.ym+l'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *".github/actions/example/action.yml"* ]]
+    [[ "$output" == *"!.github/actions/example/action.ym+l"* ]]
+}
+
+# 31
+@test "passes when a '?' exclusion does not match the composite" {
+    # 'action.ym?' means zero-or-one 'm' after 'action.y', so it matches
+    # 'action.y' / 'action.ym' but never 'action.yml': the composite still
+    # triggers the gate.
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!.github/actions/example/action.ym?'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
+}
+
+# 32
+@test "fails conservatively when '?' or '+' has no operand" {
+    # A quantifier at the start of a pattern has nothing to repeat, so the
+    # evaluator cannot decide whether it matches: fail, never assume.
+    sed -i "s|^      - '\.github/actions/\*\*'\$|&\n      - '!?github/**'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot be evaluated"* ]]
+    [[ "$output" == *"!?github/**"* ]]
+
+    # Same for '+', and for a quantifier right after a segment boundary.
+    sed -i "s|^      - '!?github/\*\*'\$|      - '!.github/+ctions/**'|" "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot be evaluated"* ]]
+    [[ "$output" == *"!.github/+ctions/**"* ]]
+}
+
+# 33
+@test "REGRESSION: a backslash-escaped dot matches literally, so an escaped exclusion is caught" {
+    # GitHub reads '\.' as a literal dot, so this exclusion DOES match the
+    # composite. Emitting the backslash literally ('\\.') matched nothing,
+    # which made the exclusion invisible and the check report OK: false green.
+    cat > "${GATE}" <<'YAML'
+name: Actions lockfile verify
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/actions.lock'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '!.github/actions/example/action\.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: southernlights-tech/actions-lock-verify-action@v1
+        with:
+          workflows: ".github/workflows/a.yml .github/workflows/b.yml"
+YAML
+    # The fixture must contain '.yml' preceded by ONE backslash.
+    grep -qF 'action\.yml' "${GATE}"
+    test -f "${WORKDIR}/.github/actions/example/action.yml"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *".github/actions/example/action.yml"* ]]
+    [[ "$output" == *'!.github/actions/example/action\.yml'* ]]
+}
+
+# 34
+@test "REGRESSION: an escaped wildcard is a literal, not a wildcard" {
+    # 'action\*.yml' is the literal name 'action*.yml', which does not match
+    # 'action.yml', so the composite still triggers the gate and the check
+    # passes. Treating '\*' as a wildcard would wrongly fail here.
+    cat > "${GATE}" <<'YAML'
+name: Actions lockfile verify
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/actions.lock'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '!.github/actions/example/action\*.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: southernlights-tech/actions-lock-verify-action@v1
+        with:
+          workflows: ".github/workflows/a.yml .github/workflows/b.yml"
+YAML
+    grep -qF 'action\*.yml' "${GATE}"
+    test -f "${WORKDIR}/.github/actions/example/action.yml"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
+}
+
+# 35
+@test "fails conservatively on a trailing backslash" {
+    # A trailing '\' escapes nothing, so the pattern has no defined meaning:
+    # fail rather than guess. Written with a quoted heredoc so the file really
+    # holds ONE trailing backslash.
+    cat > "${GATE}" <<'YAML'
+name: Actions lockfile verify
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/actions.lock'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '!.github/actions/example/**\'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: southernlights-tech/actions-lock-verify-action@v1
+        with:
+          workflows: ".github/workflows/a.yml .github/workflows/b.yml"
+YAML
+    # One backslash before the closing quote, not two.
+    grep -qF 'example/**\' "${GATE}"
+    run bash "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot be evaluated"* ]]
+    [[ "$output" == *'!.github/actions/example/**\'* ]]
+}
+
+# 36
+@test "REGRESSION: a backslash-escaped bracket is a literal, not an invalid regex" {
+    # '\[1\]' means the literal text '[1]', so the emitted ERE must be
+    # 'action\[1\]\.yml'. Before the escape-set fix a bare '[' was emitted,
+    # which either turned the pattern into a character class ('[1]' means the
+    # character '1' - the wrong meaning) or, when unterminated, produced an
+    # INVALID ERE that `[[ =~ ]]` reports as 2 and the caller read as "no
+    # match". Either way the exclusion stops meaning what the gate says.
+    # Here the literal '[1]' does not match 'action.yml', so the composite is
+    # still covered and the check must PASS - and must not report an
+    # invalid-regex/unevaluable error.
+    cat > "${GATE}" <<'YAML'
+name: Actions lockfile verify
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/actions.lock'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '!.github/actions/example/action\[1\].yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: southernlights-tech/actions-lock-verify-action@v1
+        with:
+          workflows: ".github/workflows/a.yml .github/workflows/b.yml"
+YAML
+    grep -qF 'action\[1\].yml' "${GATE}"
+    test -f "${WORKDIR}/.github/actions/example/action.yml"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gate-coverage: OK: 2 onboarded workflows"* ]]
+    [[ "$output" != *"cannot be evaluated"* ]]
+}
+
+# 37
+@test "REGRESSION: an invalid generated regex fails closed" {
+    # After the escape-set fix above, no legitimate paths pattern can translate
+    # to an invalid ERE, so the defence-in-depth guard is exercised directly
+    # against the REAL code: the helper and the shared failure message are
+    # extracted from the script under test (not retyped) and driven with a
+    # regex that `[[ =~ ]]` rejects with status 2. The probe first proves that
+    # this platform really returns 2, so the test cannot pass vacuously, and
+    # then proves the guard fails the run instead of reporting "no match".
+    helper="${BATS_TEST_TMPDIR}/gate-coverage-helpers.sh"
+    {
+        sed -n '/^fail()/,/^}$/p' "$SCRIPT"
+        sed -n '/^fail_unevaluable()/,/^}$/p' "$SCRIPT"
+        sed -n '/^path_matches_regex()/,/^}$/p' "$SCRIPT"
+    } > "${helper}"
+    # Sanity: the extraction really captured the code under test.
+    grep -q '^fail()' "${helper}"
+    grep -q '^fail_unevaluable()' "${helper}"
+    grep -q '^path_matches_regex()' "${helper}"
+
+    driver="${BATS_TEST_TMPDIR}/drive-invalid-regex.sh"
+    cat > "${driver}" <<'SH'
+#!/usr/bin/env bash
+# $1: file defining fail, fail_unevaluable and path_matches_regex.
+# shellcheck source=/dev/null
+. "$1"
+GATE_WORKFLOW=".github/workflows/gate.yaml"
+probe_rc=0
+[[ "x" =~ [abc ]] || probe_rc=$?
+echo "invalid-ere-rc=${probe_rc}"
+if [ "${probe_rc}" -ne 2 ]; then
+    echo "PROBE-UNAVAILABLE"
+    exit 3
+fi
+echo "before-guard"
+# An unclosed bracket expression: regcomp fails, so `[[ =~ ]]` returns 2.
+path_matches_regex "x" "[abc" '!.github/actions/[abc'
+echo "AFTER-GUARD"
+SH
+
+    run bash "${driver}" "${helper}"
+    [[ "$output" == *"invalid-ere-rc=2"* ]]
+    [[ "$output" != *"PROBE-UNAVAILABLE"* ]]
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot be evaluated"* ]]
+    [[ "$output" == *'!.github/actions/[abc'* ]]
+    [[ "$output" != *"AFTER-GUARD"* ]]
+}

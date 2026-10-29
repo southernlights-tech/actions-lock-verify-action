@@ -30,8 +30,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   action input.
 - Negations that could cancel `.github/actions`, including ancestor globs such as
   `!.github/**` and brace sets whose overlap cannot be ruled out, are rejected.
+- The composite-coverage assertion now **evaluates the ordered
+  `pull_request.paths` filter** against every composite action file instead of
+  matching negation patterns by path prefix. Descendant (`!.github/actions/example/**`)
+  and wildcard (`!.github/*/**`) exclusions that silently disabled the trigger
+  are now caught; patterns the evaluator cannot model (`{`, `[`) fail
+  conservatively.
+- `scripts/verify-actions-lock.sh` no longer truncates a multi-line `workflows:`
+  input to its first line: it normalises all whitespace and verifies every
+  declared path, matching `scripts/gate-coverage.sh`.
 - A truthy **resolved** `ignore-local-actions` input (for example
   `${{ true }}`) now fails the check.
+- `?` and `+` in the gate's `pull_request.paths` patterns are now evaluated as
+  **quantifiers on the preceding character** (zero-or-one and one-or-more), as
+  GitHub documents them. They were previously mis-modelled as a one-character
+  class and a literal, which could let an exclusion such as
+  `!.github/actions/example/action.ymm?l` slip through as a false green; a `?`/`+`
+  with no single preceding character now fails conservatively.
 
 ### Deprecated
 
